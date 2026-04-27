@@ -19,100 +19,94 @@ jobs:
   leech-split-file: 
     runs-on: ubuntu-latest
 
-steps:
-  - name: Checkout code
-    uses: actions/checkout@v5
-    with:
-      fetch-depth: 1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
 
-  - name: Install 7z
-    run: sudo apt-get update && sudo apt-get install -y p7zip-full
+      - name: Install 7z
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
 
-  - name: Download file
-    run: |
-      curl -L --fail --retry 3 -o downloaded_file "${{ github.event.inputs.file_url }}"
-      echo "File downloaded. Size: $(ls -lh downloaded_file | awk '{print $5}')"
+      - name: Download file
+        run: |
+          curl -L --fail --retry 3 -o downloaded_file "${{ github.event.inputs.file_url }}"
+          echo "File downloaded. Size: $(ls -lh downloaded_file | awk '{print $5}')"
 
-  - name: Extract original filename and prepare for archive
-    id: get_filename
-    run: |
-      # نام فایل دانلود شده توسط curl
-      DOWNLOADED_FILE="downloaded_file"
+      - name: Extract original filename and prepare for archive
+        id: get_filename
+        run: |
+          DOWNLOADED_FILE="downloaded_file"
+          ORIGINAL_URL="${{ github.event.inputs.file_url }}"
 
-      ORIGINAL_URL="${{ github.event.inputs.file_url }}"
+          FILENAME_FROM_URL=$(basename "$ORIGINAL_URL")
+          if [[ -z "$FILENAME_FROM_URL" || "$FILENAME_FROM_URL" == "/" ]]; then
+            FILENAME_FROM_URL="$DOWNLOADED_FILE"
+          fi
 
-      # استخراج نام فایل از URL
-      FILENAME_FROM_URL=$(basename "$ORIGINAL_URL")
+          MAX_LEN=50
+          FILENAME_BASE=$(echo "$FILENAME_FROM_URL" | sed 's/\.[^.]*$//')
+          SHORT_FILENAME_BASE=$(echo "$FILENAME_BASE" | cut -c 1-$MAX_LEN)
 
-      # اگر نام فایل از URL خالی بود، از نام پیش‌فرض استفاده می‌کنیم
-      if [[ -z "$FILENAME_FROM_URL" || "$FILENAME_FROM_URL" == "/" ]]; then
-        FILENAME_FROM_URL="$DOWNLOADED_FILE"
-      fi
+          if [[ "$FILENAME_FROM_URL" == "$FILENAME_BASE" ]]; then
+            FINAL_FILENAME="${SHORT_FILENAME_BASE}.file"
+          else
+            FILENAME_EXT="${FILENAME_FROM_URL##*.}"
+            FINAL_FILENAME="${SHORT_FILENAME_BASE}.${FILENAME_EXT}"
+          fi
 
-      # کوتاه کردن نام
-      MAX_LEN=50
-      FILENAME_BASE=$(echo "$FILENAME_FROM_URL" | sed 's/\.[^.]*$//')
-      SHORT_FILENAME_BASE=$(echo "$FILENAME_BASE" | cut -c 1-$MAX_LEN)
+          ARCHIVE_PREFIX="sci-hub.ir_"
+          FULL_ARCHIVE_NAME="${ARCHIVE_PREFIX}${FINAL_FILENAME}"
 
-      if [[ "$FILENAME_FROM_URL" == "$FILENAME_BASE" ]]; then
-        FINAL_FILENAME="${SHORT_FILENAME_BASE}.file"
-      else
-        FILENAME_EXT="${FILENAME_FROM_URL##*.}"
-        FINAL_FILENAME="${SHORT_FILENAME_BASE}.${FILENAME_EXT}"
-      fi
+          echo "Archive base name will be: ${FULL_ARCHIVE_NAME}"
+          # استفاده از GITHUB_OUTPUT به جای set-output (برای رفع warning)
+          echo "archive_base_name=${FULL_ARCHIVE_NAME}" >> $GITHUB_OUTPUT
+          echo "downloaded_file_name=${DOWNLOADED_FILE}" >> $GITHUB_OUTPUT
+          # برای filename اصلی هم یک خروجی اضافه می کنیم تا در commit استفاده شود
+          echo "original_filename=${FINAL_FILENAME}" >> $GITHUB_OUTPUT 
 
-      # اضافه کردن نام سایت به ابتدای نام فایل نهایی
-      ARCHIVE_PREFIX="sci-hub.ir_"
-      FULL_ARCHIVE_NAME="${ARCHIVE_PREFIX}${FINAL_FILENAME}"
+      - name: Create password-protected multi-part archive (85MB chunks)
+        run: |
+          ARCHIVE_NAME="${{ steps.get_filename.outputs.archive_base_name }}.7z"
+          echo "Creating archive: ${ARCHIVE_NAME}"
+          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=3 -v85m "${ARCHIVE_NAME}" "${{ steps.get_filename.outputs.downloaded_file_name }}"
 
-      echo "Archive base name will be: ${FULL_ARCHIVE_NAME}"
-      echo "::set-output name=archive_base_name::${FULL_ARCHIVE_NAME}"
-      echo "::set-output name=downloaded_file_name::${DOWNLOADED_FILE}"
-
-  - name: Create password-protected multi-part archive (85MB chunks)
-    run: |
-      ARCHIVE_NAME="${{ steps.get_filename.outputs.archive_base_name }}.7z"
-      echo "Creating archive: ${ARCHIVE_NAME}"
-      7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=3 -v85m "${ARCHIVE_NAME}" "${{ steps.get_filename.outputs.downloaded_file_name }}"
-
-  - name: Remove original downloaded file
-    if: steps.get_filename.outputs.downloaded_file_name != ''
-    run: rm "${{ steps.get_filename.outputs.downloaded_file_name }}"
-
+      - name: Remove original downloaded file
+        # این step بعد از ساخت آرشیو و قبل از push کردن لازم است
+        if: steps.get_filename.outputs.downloaded_file_name != ''
+        run: rm "${{ steps.get_filename.outputs.downloaded_file_name }}"
 
       # کانفیگ Git برای استفاده از اکانت گیت‌هاب اکشن
       - name: Configure Git
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" # استفاده از GITHUB_TOKEN برای احراز هویت
+          # استفاده از GITHUB_TOKEN برای احراز هویت - نیازی به secret مجزا نیست
+          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
 
       # آماده‌سازی برای Push کردن
-      - name: Prepare for commit
-        run: |
-          # افزودن تمام فایل‌های آرشیو به Git
-          git add sci-hub.ir_${{ steps.get_filename.outputs.original_name }}.7z.*
-          echo "Added archive chunks to staging."
-
-       # ... (مراحل قبلی مثل دانلود و استخراج)
-
       - name: Commit and Push chunks
         run: |
+          # ساخت نام فایل آرشیو نهایی با پیشوند و پسوند
+          ARCHIVE_CHUNK_NAME="sci-hub.ir_${{ steps.get_filename.outputs.original_filename }}"
+          echo "Adding archive files: ${ARCHIVE_CHUNK_NAME}.7z.*"
+
           # افزودن تمام فایل‌های آرشیو به Git
-          git add sci-hub.ir_${{ steps.get_filename.outputs.original_name }}.7z.*
-          echo "Added all archive chunks to staging."
+          # (*) به صورت خودکار همه chunk ها را اضافه می‌کند
+          git add "${ARCHIVE_CHUNK_NAME}.7z.*" 
+          echo "Added archive chunks to staging."
 
           # بررسی کنید آیا تغییری برای کامیت وجود دارد
           if ! git diff --staged --quiet; then
             # کامیت کردن تمام تغییرات یکباره
-            git commit -m "Add all archive chunks for ${{ steps.get_filename.outputs.original_name }}"
+            git commit -m "Add archive chunks for ${{ steps.get_filename.outputs.original_filename }}"
             echo "Committed all archive chunks."
 
             # Push کردن تمام تغییرات با تلاش مجدد
             push_success=false
-            # ما اینجا تعداد تلاش‌ها رو بیشتر می‌کنیم چون یک push بزرگ داریم
-            for attempt in {1..15}; do
-              echo "Attempt $attempt to push all changes..."
+            max_attempts=15
+            for attempt in $(seq 1 $max_attempts); do
+              echo "Attempt $attempt of $max_attempts to push all changes..."
               # سعی می‌کنیم بدون force push کنیم. اگر موفق نشد، بعداً force-with-lease رو امتحان می‌کنیم
               if git push origin HEAD; then
                 echo "Push successful."
@@ -121,16 +115,18 @@ steps:
               else
                 echo "Push failed on attempt $attempt. Retrying in 20 seconds..."
                 sleep 20
-                # سعی می‌کنیم قبل از تلاش مجدد، ریپو رو آپدیت کنیم
-                # ولی چون ما فقط اضافه کردیم و کسی دیگه کامیت نکرده، این ممکنه لازم نباشه
-                # اگر لازم بود: git fetch origin && git reset --hard origin/$(git rev-parse --abbrev-ref HEAD)
+                # اگر push ناموفق بود، مخزن را fetch می‌کنیم تا از آخرین وضعیت مطلع شویم
+                git fetch origin
+                # و اگر لازم بود (مثلا اگر کسی دیگر push کرده بود)، ریست می‌کنیم. 
+                # اما چون ما فقط فایل اضافه می‌کنیم، این ممکن است همیشه لازم نباشد.
+                # git reset --hard origin/main # یا شاخه‌ای که روی آن هستید
               fi
             done
 
             if [ "$push_success" = false ]; then
-              echo "Failed to push all chunks after multiple attempts. Attempting force push..."
+              echo "Failed to push all chunks after multiple attempts. Attempting force push with lease..."
               # اگر push معمولی ناموفق بود، از force-with-lease استفاده می‌کنیم
-              # این باید با احتیاط استفاده شود، اما برای workflow که فقط اضافه می‌کند، معمولاً امن است
+              # این باید با احتیاط استفاده شود، اما برای workflow که فقط فایل اضافه می‌کند، معمولاً امن است
               if git push origin HEAD --force-with-lease; then
                 echo "Force push successful."
                 push_success=true
@@ -142,4 +138,3 @@ steps:
           else
             echo "No changes to commit or push."
           fi
-  
